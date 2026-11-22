@@ -1,0 +1,106 @@
+name: Build WebView APK
+on:
+  push:
+    paths: ['.github/workflows/webview.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  # Change only the URL below, keeping the quotes.
+  SITE_URL: 'https://pooyaweb.ir'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Prepare project
+        shell: bash
+        run: |
+          set -eu
+          sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+          mkdir -p src/main/java/app/simple/viewer src/main/assets
+          python3 - <<'PY'
+          import os, pathlib, urllib.parse
+          url = os.environ['SITE_URL'].strip()
+          p = urllib.parse.urlsplit(url)
+          if p.scheme != 'https' or not p.hostname or p.username is not None or any(c.isspace() for c in url):
+              raise SystemExit('SITE_URL must be an HTTPS website URL without spaces or credentials')
+          pathlib.Path('src/main/assets/url.txt').write_text(url, encoding='utf-8')
+          PY
+          cat > settings.gradle <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = 'SiteViewer'
+          EOF
+          cat > build.gradle <<'EOF'
+          plugins { id 'com.android.application' version '8.7.3' }
+          android {
+              namespace 'app.simple.viewer'
+              compileSdk 35
+              defaultConfig {
+                  applicationId 'app.simple.viewer'
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+          }
+          EOF
+          cat > src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <application android:label="Site Viewer" android:usesCleartextTraffic="false" android:allowBackup="false" android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity android:name=".Main" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          cat > src/main/java/app/simple/viewer/Main.java <<'EOF'
+          package app.simple.viewer;
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.webkit.*;
+          import java.io.*;
+          public class Main extends Activity {
+              private WebView web;
+              @Override public void onCreate(Bundle state) {
+                  super.onCreate(state);
+                  String url;
+                  try (BufferedReader r = new BufferedReader(new InputStreamReader(getAssets().open("url.txt"), "UTF-8"))) {
+                      url = r.readLine();
+                  } catch (IOException e) { throw new IllegalStateException(e); }
+                  web = new WebView(this);
+                  setContentView(web);
+                  web.getSettings().setJavaScriptEnabled(true);
+                  web.getSettings().setDomStorageEnabled(true);
+                  web.getSettings().setAllowFileAccess(false);
+                  web.getSettings().setAllowContentAccess(false);
+                  web.setWebViewClient(new WebViewClient() {
+                      @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {
+                          return !"https".equalsIgnoreCase(req.getUrl().getScheme());
+                      }
+                  });
+                  if (state == null || web.restoreState(state) == null) web.loadUrl(url);
+              }
+              @Override protected void onSaveInstanceState(Bundle state) { super.onSaveInstanceState(state); web.saveState(state); }
+              @Override public void onBackPressed() { if (web.canGoBack()) web.goBack(); else super.onBackPressed(); }
+          }
+          EOF
+      - name: Build test APK
+        run: gradle --no-daemon assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WebView-APK
+          path: build/outputs/apk/debug/*.apk
+          if-no-files-found: error
